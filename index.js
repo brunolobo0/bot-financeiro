@@ -59,12 +59,19 @@ function obterInicioDoCiclo(dataAtual) {
   return primeiroDiaUtil;
 }
 
-function obterFimDoCiclo(dataAtual) {
-  let ano = dataAtual.getFullYear();
-  let mes = dataAtual.getMonth();
-  // O próximo ciclo inicia no mês seguinte
-  let proximoMes = new Date(ano, mes + 1, 1);
-  return obterInicioDoCiclo(proximoMes);
+// CORREÇÃO APLICADA AQUI: Calcula o fim do ciclo com base no início dele, não no dia atual
+function obterFimDoCiclo(inicioDoCiclo) {
+  let ano = inicioDoCiclo.getFullYear();
+  let mes = inicioDoCiclo.getMonth();
+
+  let primeiroDiaProximoMes = new Date(ano, mes + 1, 1);
+  let diaSemana = primeiroDiaProximoMes.getDay();
+
+  let primeiroDiaUtil = new Date(primeiroDiaProximoMes);
+  if (diaSemana === 0) primeiroDiaUtil.setDate(2);
+  if (diaSemana === 6) primeiroDiaUtil.setDate(3);
+
+  return primeiroDiaUtil;
 }
 
 bot.start((ctx) => {
@@ -95,8 +102,9 @@ bot.on("text", async (ctx) => {
       .trim();
     const iaResponse = JSON.parse(responseText);
 
+    // CORREÇÃO APLICADA AQUI: Agora ele passa a variável certa
     const inicioDoCiclo = obterInicioDoCiclo(new Date());
-    const fimDoCiclo = obterFimDoCiclo(new Date());
+    const fimDoCiclo = obterFimDoCiclo(inicioDoCiclo);
 
     // ==========================================
     // FLUXO A: REGISTRAR GASTO (Á VISTA OU PARCELADO)
@@ -110,9 +118,7 @@ bot.on("text", async (ctx) => {
       const linhasParaInserir = [];
       const hoje = new Date();
 
-      // Gera as linhas para a planilha
       for (let i = 0; i < parcelas; i++) {
-        // Se for a primeira parcela, cai hoje. Se forem as futuras, joga pro dia 10 de cada mês para garantir o ciclo certo
         let dataGasto = new Date(
           hoje.getFullYear(),
           hoje.getMonth() + i,
@@ -136,7 +142,6 @@ bot.on("text", async (ctx) => {
         ]);
       }
 
-      // Insere tudo de uma vez no Sheets usando as colunas A até E
       await sheets.spreadsheets.values.append({
         spreadsheetId: process.env.SPREADSHEET_ID,
         range: "Página1!A:E",
@@ -144,7 +149,6 @@ bot.on("text", async (ctx) => {
         requestBody: { values: linhasParaInserir },
       });
 
-      // Re-lê a planilha para calcular o total do mês atual com a nova inserção
       const respostaPlanilha = await sheets.spreadsheets.values.get({
         spreadsheetId: process.env.SPREADSHEET_ID,
         range: "Página1!A:E",
@@ -165,10 +169,14 @@ bot.on("text", async (ctx) => {
           partesData[0],
         );
 
-        // Limita a leitura apenas ao mês atual (ignora meses futuros)
         if (dGasto >= inicioDoCiclo && dGasto < fimDoCiclo) {
-          const val = parseFloat(linha[3].toString().replace(",", "."));
-          const tipoPlanilha = linha[4] || "Única"; // Se for linha antiga, assume Única
+          // CORREÇÃO: Trata números grandes como 1.200,00 sem quebrar a soma
+          const valLimpo = linha[3]
+            .toString()
+            .replace(/\./g, "")
+            .replace(",", ".");
+          const val = parseFloat(valLimpo);
+          const tipoPlanilha = linha[4] || "Única";
 
           if (tipoPlanilha === "Parcelado") somaParcelado += val;
           else somaNormal += val;
@@ -230,7 +238,12 @@ bot.on("text", async (ctx) => {
             categoriaBuscada === "Todas" ||
             categoriaPlanilha === categoriaBuscada.toLowerCase()
           ) {
-            const val = parseFloat(linha[3].toString().replace(",", "."));
+            // CORREÇÃO NUMÉRICA AQUI TAMBÉM
+            const valLimpo = linha[3]
+              .toString()
+              .replace(/\./g, "")
+              .replace(",", ".");
+            const val = parseFloat(valLimpo);
             const tipoPlanilha = linha[4] || "Única";
 
             if (tipoPlanilha === "Parcelado") somaParcelado += val;
