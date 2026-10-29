@@ -7,7 +7,6 @@ const express = require("express");
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// Autenticação Híbrida: Usa variáveis de ambiente no Render ou credentials.json no Mac
 const authOptions = {
   scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 };
@@ -23,22 +22,21 @@ const auth = new google.auth.GoogleAuth(authOptions);
 const sheets = google.sheets({ version: "v4", auth });
 
 const systemPrompt = `Você é um assistente financeiro inteligente.
-Analise a mensagem do usuário e identifique se a intenção dele é REGISTRAR um novo gasto ou CONSULTAR os gastos já feitos.
+Analise a mensagem do usuário e identifique se a intenção é REGISTRAR um gasto ou CONSULTAR.
 Devolva ESTRITAMENTE um objeto JSON, sem nenhum texto fora dele.
 
-Se a intenção for REGISTRAR, devolva o JSON assim:
-{"intencao": "registrar", "categoria": "Luz", "valor": 50.00, "descricao": "Conta de luz"}
+Se a intenção for REGISTRAR, devolva o JSON neste formato:
+{"intencao": "registrar", "categoria": "Eletrônicos", "valor_total": 300.00, "descricao": "Microondas", "parcelado": true, "qtd_parcelas": 3}
 (Categorias válidas: Luz, Água, Combustível, Alimentação, Internet, Outros)
 
-⚠️ REGRA DE DIVISÃO DE CONTAS: Se o usuário mencionar que dividiu a despesa, você DEVE calcular a fração correta e colocar no campo "valor" APENAS a parte que o usuário vai pagar. 
-- Exemplo 1: "Jantei com um amigo e vamos dividir a conta. Deu 230" (O usuário + 1 amigo = 2 pessoas. 230 / 2) -> "valor": 115.00.
-- Exemplo 2: "Deu 300 e dividi com 5 amigos" (O usuário + 5 amigos = 6 pessoas. 300 / 6) -> "valor": 50.00.
-- Exemplo 3: "Deu 200 dividido para 5 pessoas" (5 pessoas no total. 200 / 5) -> "valor": 40.00.
-Quando houver divisão, anote isso na "descricao". Ex: "Jantar (dividido com amigo)".
+⚠️ REGRAS DE REGISTRO E PARCELAMENTO:
+- Se houver divisão de conta (ex: "dividi com 1 amigo"), o "valor_total" deve ser APENAS a sua parte.
+- Se for compra parcelada (ex: "comprei por 300 em 3x", "parcelado em 5 vezes"), marque "parcelado": true, extraia o número de vezes para "qtd_parcelas" e coloque o valor INTEGRAL no "valor_total".
+- Se NÃO for parcelado, devolva "parcelado": false e "qtd_parcelas": 1.
 
-Se a intenção for CONSULTAR, devolva o JSON assim:
+Se a intenção for CONSULTAR:
 {"intencao": "consultar", "categoria": "Alimentação"}
-(Se o usuário perguntar o gasto de uma categoria específica, use a categoria correspondente. Se ele perguntar o total geral, use a categoria "Todas").`;
+(Se perguntar o total geral, use a categoria "Todas").`;
 
 function obterInicioDoCiclo(dataAtual) {
   let ano = dataAtual.getFullYear();
@@ -61,29 +59,30 @@ function obterInicioDoCiclo(dataAtual) {
   return primeiroDiaUtil;
 }
 
+function obterFimDoCiclo(dataAtual) {
+  let ano = dataAtual.getFullYear();
+  let mes = dataAtual.getMonth();
+  // O próximo ciclo inicia no mês seguinte
+  let proximoMes = new Date(ano, mes + 1, 1);
+  return obterInicioDoCiclo(proximoMes);
+}
+
 bot.start((ctx) => {
   if (String(ctx.from.id) !== String(process.env.MEU_ID_TELEGRAM)) {
-    return ctx.reply(
-      "🔒 Acesso negado. Este é um assistente financeiro privado.",
-    );
+    return ctx.reply("🔒 Acesso negado.");
   }
-  ctx.reply(
-    'Olá! Mande seus gastos para anotar ou me faça perguntas como "Quanto gastei de internet?".',
-  );
+  ctx.reply("Olá! Mande seus gastos, sejam eles à vista ou parcelados.");
 });
 
 bot.on("text", async (ctx) => {
-  // 🔒 TRAVA DE SEGURANÇA: Verifica se quem mandou a mensagem é você
   if (String(ctx.from.id) !== String(process.env.MEU_ID_TELEGRAM)) {
-    return ctx.reply(
-      "🔒 Acesso negado. Este é um assistente financeiro privado.",
-    );
+    return ctx.reply("🔒 Acesso negado.");
   }
 
   const userMessage = ctx.message.text;
 
   try {
-    const loadingMsg = await ctx.reply("Pensando... 🤔");
+    const loadingMsg = await ctx.reply("Calculando... 🤔");
 
     const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
     const result = await model.generateContent(
@@ -96,59 +95,100 @@ bot.on("text", async (ctx) => {
       .trim();
     const iaResponse = JSON.parse(responseText);
 
-    const respostaPlanilha = await sheets.spreadsheets.values.get({
-      spreadsheetId: process.env.SPREADSHEET_ID,
-      range: "Página1!A:D",
-    });
-    const linhas = respostaPlanilha.data.values || [];
     const inicioDoCiclo = obterInicioDoCiclo(new Date());
+    const fimDoCiclo = obterFimDoCiclo(new Date());
 
     // ==========================================
-    // FLUXO A: REGISTRAR GASTO
+    // FLUXO A: REGISTRAR GASTO (Á VISTA OU PARCELADO)
     // ==========================================
     if (iaResponse.intencao === "registrar") {
-      const hoje = new Date();
-      const dataFormatada = hoje.toLocaleDateString("pt-BR");
+      const isParcelado = iaResponse.parcelado;
+      const parcelas = iaResponse.qtd_parcelas || 1;
+      const valorTotal = iaResponse.valor_total;
+      const valorParcela = valorTotal / parcelas;
 
+      const linhasParaInserir = [];
+      const hoje = new Date();
+
+      // Gera as linhas para a planilha
+      for (let i = 0; i < parcelas; i++) {
+        // Se for a primeira parcela, cai hoje. Se forem as futuras, joga pro dia 10 de cada mês para garantir o ciclo certo
+        let dataGasto = new Date(
+          hoje.getFullYear(),
+          hoje.getMonth() + i,
+          hoje.getDate(),
+        );
+        if (i > 0)
+          dataGasto = new Date(hoje.getFullYear(), hoje.getMonth() + i, 10);
+
+        const dataFormatada = dataGasto.toLocaleDateString("pt-BR");
+        const tipo = isParcelado ? "Parcelado" : "Única";
+        const desc = isParcelado
+          ? `${iaResponse.descricao} (Parcela ${i + 1}/${parcelas})`
+          : iaResponse.descricao;
+
+        linhasParaInserir.push([
+          dataFormatada,
+          iaResponse.categoria,
+          desc,
+          valorParcela,
+          tipo,
+        ]);
+      }
+
+      // Insere tudo de uma vez no Sheets usando as colunas A até E
       await sheets.spreadsheets.values.append({
         spreadsheetId: process.env.SPREADSHEET_ID,
-        range: "Página1!A:D",
+        range: "Página1!A:E",
         valueInputOption: "USER_ENTERED",
-        requestBody: {
-          values: [
-            [
-              dataFormatada,
-              iaResponse.categoria,
-              iaResponse.descricao,
-              iaResponse.valor,
-            ],
-          ],
-        },
+        requestBody: { values: linhasParaInserir },
       });
 
-      let somaTotal = 0;
+      // Re-lê a planilha para calcular o total do mês atual com a nova inserção
+      const respostaPlanilha = await sheets.spreadsheets.values.get({
+        spreadsheetId: process.env.SPREADSHEET_ID,
+        range: "Página1!A:E",
+      });
+      const linhas = respostaPlanilha.data.values || [];
+
+      let somaNormal = 0;
+      let somaParcelado = 0;
+
       for (let i = 1; i < linhas.length; i++) {
         const linha = linhas[i];
         if (!linha[0] || !linha[3]) continue;
+
         const partesData = linha[0].split("/");
-        const dataGasto = new Date(
+        const dGasto = new Date(
           partesData[2],
           partesData[1] - 1,
           partesData[0],
         );
 
-        if (dataGasto >= inicioDoCiclo) {
-          somaTotal += parseFloat(linha[3].toString().replace(",", "."));
+        // Limita a leitura apenas ao mês atual (ignora meses futuros)
+        if (dGasto >= inicioDoCiclo && dGasto < fimDoCiclo) {
+          const val = parseFloat(linha[3].toString().replace(",", "."));
+          const tipoPlanilha = linha[4] || "Única"; // Se for linha antiga, assume Única
+
+          if (tipoPlanilha === "Parcelado") somaParcelado += val;
+          else somaNormal += val;
         }
       }
-      somaTotal += iaResponse.valor;
+
+      const total = somaNormal + somaParcelado;
+      let detalheParcelaMsg = isParcelado
+        ? ` em ${parcelas}x de R$ ${valorParcela.toFixed(2).replace(".", ",")}`
+        : ``;
 
       const mensagemFinal =
         `✅ **Gasto anotado!**\n\n` +
         `🏷 Categoria: ${iaResponse.categoria}\n` +
         `📝 Descrição: ${iaResponse.descricao}\n` +
-        `💸 Valor: R$ ${iaResponse.valor.toFixed(2).replace(".", ",")}\n\n` +
-        `📊 **Total da Fatura:** R$ ${somaTotal.toFixed(2).replace(".", ",")}`;
+        `💸 Valor: R$ ${valorTotal.toFixed(2).replace(".", ",")}${detalheParcelaMsg}\n\n` +
+        `📊 **Resumo deste mês:**\n` +
+        `🔹 Gastos do mês: R$ ${somaNormal.toFixed(2).replace(".", ",")}\n` +
+        `🔹 Parcelas: R$ ${somaParcelado.toFixed(2).replace(".", ",")}\n` +
+        `**Total da Fatura: R$ ${total.toFixed(2).replace(".", ",")}**`;
 
       await ctx.telegram.editMessageText(
         ctx.chat.id,
@@ -163,7 +203,14 @@ bot.on("text", async (ctx) => {
     // FLUXO B: CONSULTAR GASTO
     // ==========================================
     else if (iaResponse.intencao === "consultar") {
-      let somaConsulta = 0;
+      const respostaPlanilha = await sheets.spreadsheets.values.get({
+        spreadsheetId: process.env.SPREADSHEET_ID,
+        range: "Página1!A:E",
+      });
+      const linhas = respostaPlanilha.data.values || [];
+
+      let somaNormal = 0;
+      let somaParcelado = 0;
       const categoriaBuscada = iaResponse.categoria;
 
       for (let i = 1; i < linhas.length; i++) {
@@ -178,21 +225,33 @@ bot.on("text", async (ctx) => {
         );
         const categoriaPlanilha = linha[1].toLowerCase();
 
-        if (dataGasto >= inicioDoCiclo) {
+        if (dataGasto >= inicioDoCiclo && dataGasto < fimDoCiclo) {
           if (
             categoriaBuscada === "Todas" ||
             categoriaPlanilha === categoriaBuscada.toLowerCase()
           ) {
-            somaConsulta += parseFloat(linha[3].toString().replace(",", "."));
+            const val = parseFloat(linha[3].toString().replace(",", "."));
+            const tipoPlanilha = linha[4] || "Única";
+
+            if (tipoPlanilha === "Parcelado") somaParcelado += val;
+            else somaNormal += val;
           }
         }
       }
 
+      const total = somaNormal + somaParcelado;
       let msg = "";
+
       if (categoriaBuscada === "Todas") {
-        msg = `📊 Seu gasto **Total** na fatura atual está em: **R$ ${somaConsulta.toFixed(2).replace(".", ",")}**`;
+        msg =
+          `📊 **Resumo da sua fatura atual:**\n\n` +
+          `🔹 Gastos do mês: R$ ${somaNormal.toFixed(2).replace(".", ",")}\n` +
+          `🔹 Parcelas: R$ ${somaParcelado.toFixed(2).replace(".", ",")}\n` +
+          `**Total: R$ ${total.toFixed(2).replace(".", ",")}**`;
       } else {
-        msg = `🔎 Você gastou **R$ ${somaConsulta.toFixed(2).replace(".", ",")}** com *${categoriaBuscada}* neste ciclo.`;
+        msg =
+          `🔎 Você gastou **R$ ${total.toFixed(2).replace(".", ",")}** com *${categoriaBuscada}* neste ciclo.\n\n` +
+          `*(Sendo R$ ${somaNormal.toFixed(2).replace(".", ",")} do mês e R$ ${somaParcelado.toFixed(2).replace(".", ",")} em parcelas)*`;
       }
 
       await ctx.telegram.editMessageText(
@@ -212,7 +271,6 @@ bot.on("text", async (ctx) => {
 bot.launch();
 console.log("Bot conectado à Planilha e rodando!");
 
-// === MINI SERVIDOR WEB PARA O RENDER ===
 const app = express();
 app.get("/", (req, res) => {
   res.send("Bot Financeiro está online! 🚀");
