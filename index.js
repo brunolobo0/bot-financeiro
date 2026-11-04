@@ -95,8 +95,8 @@ bot.on("text", async (ctx) => {
   try {
     loadingMsg = await ctx.reply("Calculando... 🤔");
 
-    // Retornamos ao método antigo de leitura que é mais amigável a falhas do Gemini
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    // ATUALIZADO: Usando o modelo Gemini 2.0 Flash
+    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
     const result = await model.generateContent(
       `${systemPrompt}\n\nUsuário: "${userMessage}"`,
     );
@@ -255,7 +255,6 @@ bot.on("text", async (ctx) => {
     }
   } catch (error) {
     console.error("Erro detalhado:", error);
-    // Retiramos o 'Markdown' desta resposta. Agora é impossível o Telegram travar a mensagem de erro.
     try {
       await ctx.telegram.editMessageText(
         ctx.chat.id,
@@ -270,7 +269,7 @@ bot.on("text", async (ctx) => {
 });
 
 bot.launch();
-console.log("Bot blindado contra falhas silenciosas e rodando!");
+console.log("Bot atualizado para a versão 2.0 e rodando!");
 
 const app = express();
 app.get("/", (req, res) => res.send("Bot Financeiro está online! 🚀"));
