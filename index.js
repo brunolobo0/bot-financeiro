@@ -90,19 +90,22 @@ bot.on("text", async (ctx) => {
     return ctx.reply("🔒 Acesso negado.");
 
   const userMessage = ctx.message.text;
+  let loadingMsg;
 
   try {
-    const loadingMsg = await ctx.reply("Calculando... 🤔");
+    loadingMsg = await ctx.reply("Calculando... 🤔");
 
-    // NOVA TRAVA: Obriga o Gemini a devolver JSON puro
-    const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash",
-      generationConfig: { responseMimeType: "application/json" },
-    });
+    // Retornamos ao método antigo de leitura que é mais amigável a falhas do Gemini
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
     const result = await model.generateContent(
       `${systemPrompt}\n\nUsuário: "${userMessage}"`,
     );
-    const iaResponse = JSON.parse(result.response.text());
+    const responseText = result.response
+      .text()
+      .replace(/```json/g, "")
+      .replace(/```/g, "")
+      .trim();
+    const iaResponse = JSON.parse(responseText);
 
     const inicioAtual = obterInicioDoCiclo(new Date());
     const fimAtual = obterFimDoCiclo(inicioAtual);
@@ -116,10 +119,11 @@ bot.on("text", async (ctx) => {
       const valorTotal = converterValorSeguro(iaResponse.valor_total);
 
       if (valorTotal === 0 || isNaN(valorTotal)) {
-        throw new Error("Valor final extraído da IA foi 0 ou inválido.");
+        throw new Error(
+          "O valor extraído da IA foi 0 ou não foi reconhecido como número.",
+        );
       }
 
-      // Arredonda para 2 casas decimais para o Google Sheets não surtar
       const valorParcela = parseFloat((valorTotal / parcelas).toFixed(2));
       const linhasParaInserir = [];
       const hoje = new Date();
@@ -185,8 +189,8 @@ bot.on("text", async (ctx) => {
         `🏷 Categoria: ${iaResponse.categoria}\n` +
         `💸 Valor: R$ ${valorTotal.toFixed(2).replace(".", ",")}${detalheParcelaMsg}\n\n` +
         `📊 **Resumo Atualizado:**\n` +
-        `🗓 **Fatura Atual (Vence este mês):** R$ ${faturaAtual.toFixed(2).replace(".", ",")}\n` +
-        `📅 **Próxima Fatura (Mês que vem):** R$ ${faturaProxima.toFixed(2).replace(".", ",")}`;
+        `🗓 **Fatura Atual:** R$ ${faturaAtual.toFixed(2).replace(".", ",")}\n` +
+        `📅 **Próxima Fatura:** R$ ${faturaProxima.toFixed(2).replace(".", ",")}`;
 
       await ctx.telegram.editMessageText(
         ctx.chat.id,
@@ -251,19 +255,22 @@ bot.on("text", async (ctx) => {
     }
   } catch (error) {
     console.error("Erro detalhado:", error);
-    // Agora o bot mostra exatamente qual foi o erro no Tele
-    ctx.telegram.editMessageText(
-      ctx.chat.id,
-      loadingMsg.message_id,
-      undefined,
-      `🚨 Tive um problema técnico. O sistema relatou o seguinte erro: \n\n_${error.message}_\n\nVerifique e tente novamente.`,
-      { parse_mode: "Markdown" },
-    );
+    // Retiramos o 'Markdown' desta resposta. Agora é impossível o Telegram travar a mensagem de erro.
+    try {
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        loadingMsg.message_id,
+        undefined,
+        `🚨 Tive um problema técnico.\n\nMotivo: ${error.message}\n\nTente mandar a frase novamente.`,
+      );
+    } catch (e) {
+      console.error("Erro crítico ao tentar avisar o usuário:", e);
+    }
   }
 });
 
 bot.launch();
-console.log("Bot blindado e rodando!");
+console.log("Bot blindado contra falhas silenciosas e rodando!");
 
 const app = express();
 app.get("/", (req, res) => res.send("Bot Financeiro está online! 🚀"));
