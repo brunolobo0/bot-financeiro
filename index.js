@@ -59,7 +59,6 @@ function obterInicioDoCiclo(dataAtual) {
   return primeiroDiaUtil;
 }
 
-// CORREÇÃO APLICADA AQUI: Calcula o fim do ciclo com base no início dele, não no dia atual
 function obterFimDoCiclo(inicioDoCiclo) {
   let ano = inicioDoCiclo.getFullYear();
   let mes = inicioDoCiclo.getMonth();
@@ -102,13 +101,9 @@ bot.on("text", async (ctx) => {
       .trim();
     const iaResponse = JSON.parse(responseText);
 
-    // CORREÇÃO APLICADA AQUI: Agora ele passa a variável certa
     const inicioDoCiclo = obterInicioDoCiclo(new Date());
     const fimDoCiclo = obterFimDoCiclo(inicioDoCiclo);
 
-    // ==========================================
-    // FLUXO A: REGISTRAR GASTO (Á VISTA OU PARCELADO)
-    // ==========================================
     if (iaResponse.intencao === "registrar") {
       const isParcelado = iaResponse.parcelado;
       const parcelas = iaResponse.qtd_parcelas || 1;
@@ -119,13 +114,12 @@ bot.on("text", async (ctx) => {
       const hoje = new Date();
 
       for (let i = 0; i < parcelas; i++) {
+        // i + 1 joga a primeira parcela para o mês que vem
         let dataGasto = new Date(
           hoje.getFullYear(),
-          hoje.getMonth() + i,
-          hoje.getDate(),
+          hoje.getMonth() + i + 1,
+          10,
         );
-        if (i > 0)
-          dataGasto = new Date(hoje.getFullYear(), hoje.getMonth() + i, 10);
 
         const dataFormatada = dataGasto.toLocaleDateString("pt-BR");
         const tipo = isParcelado ? "Parcelado" : "Única";
@@ -170,7 +164,6 @@ bot.on("text", async (ctx) => {
         );
 
         if (dGasto >= inicioDoCiclo && dGasto < fimDoCiclo) {
-          // CORREÇÃO: Trata números grandes como 1.200,00 sem quebrar a soma
           const valLimpo = linha[3]
             .toString()
             .replace(/\./g, "")
@@ -189,14 +182,14 @@ bot.on("text", async (ctx) => {
         : ``;
 
       const mensagemFinal =
-        `✅ **Gasto anotado!**\n\n` +
+        `✅ **Gasto anotado para a próxima fatura!**\n\n` +
         `🏷 Categoria: ${iaResponse.categoria}\n` +
         `📝 Descrição: ${iaResponse.descricao}\n` +
         `💸 Valor: R$ ${valorTotal.toFixed(2).replace(".", ",")}${detalheParcelaMsg}\n\n` +
-        `📊 **Resumo deste mês:**\n` +
+        `📊 **Resumo da fatura atual (não inclui este lançamento):**\n` +
         `🔹 Gastos do mês: R$ ${somaNormal.toFixed(2).replace(".", ",")}\n` +
         `🔹 Parcelas: R$ ${somaParcelado.toFixed(2).replace(".", ",")}\n` +
-        `**Total da Fatura: R$ ${total.toFixed(2).replace(".", ",")}**`;
+        `**Total atual: R$ ${total.toFixed(2).replace(".", ",")}**`;
 
       await ctx.telegram.editMessageText(
         ctx.chat.id,
@@ -205,12 +198,7 @@ bot.on("text", async (ctx) => {
         mensagemFinal,
         { parse_mode: "Markdown" },
       );
-    }
-
-    // ==========================================
-    // FLUXO B: CONSULTAR GASTO
-    // ==========================================
-    else if (iaResponse.intencao === "consultar") {
+    } else if (iaResponse.intencao === "consultar") {
       const respostaPlanilha = await sheets.spreadsheets.values.get({
         spreadsheetId: process.env.SPREADSHEET_ID,
         range: "Página1!A:E",
@@ -238,7 +226,6 @@ bot.on("text", async (ctx) => {
             categoriaBuscada === "Todas" ||
             categoriaPlanilha === categoriaBuscada.toLowerCase()
           ) {
-            // CORREÇÃO NUMÉRICA AQUI TAMBÉM
             const valLimpo = linha[3]
               .toString()
               .replace(/\./g, "")
