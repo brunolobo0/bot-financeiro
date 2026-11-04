@@ -68,7 +68,6 @@ function obterFimDoCiclo(inicioDoCiclo) {
   return primeiroDiaUtil;
 }
 
-// 🛡️ Função Blindada: Garante que nada que a IA inventar vai quebrar a planilha
 function converterValorSeguro(texto) {
   if (!texto) return 0;
   let stringVal = texto.toString().trim();
@@ -95,16 +94,15 @@ bot.on("text", async (ctx) => {
   try {
     const loadingMsg = await ctx.reply("Calculando... 🤔");
 
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    // NOVA TRAVA: Obriga o Gemini a devolver JSON puro
+    const model = genAI.getGenerativeModel({
+      model: "gemini-1.5-flash",
+      generationConfig: { responseMimeType: "application/json" },
+    });
     const result = await model.generateContent(
       `${systemPrompt}\n\nUsuário: "${userMessage}"`,
     );
-    const responseText = result.response
-      .text()
-      .replace(/```json/g, "")
-      .replace(/```/g, "")
-      .trim();
-    const iaResponse = JSON.parse(responseText);
+    const iaResponse = JSON.parse(result.response.text());
 
     const inicioAtual = obterInicioDoCiclo(new Date());
     const fimAtual = obterFimDoCiclo(inicioAtual);
@@ -115,19 +113,18 @@ bot.on("text", async (ctx) => {
       const isParcelado = iaResponse.parcelado;
       const parcelas = parseInt(iaResponse.qtd_parcelas) || 1;
 
-      // Passa pelo filtro de blindagem
       const valorTotal = converterValorSeguro(iaResponse.valor_total);
 
       if (valorTotal === 0 || isNaN(valorTotal)) {
-        throw new Error("Valor extraído é nulo ou inválido.");
+        throw new Error("Valor final extraído da IA foi 0 ou inválido.");
       }
 
-      const valorParcela = valorTotal / parcelas;
+      // Arredonda para 2 casas decimais para o Google Sheets não surtar
+      const valorParcela = parseFloat((valorTotal / parcelas).toFixed(2));
       const linhasParaInserir = [];
       const hoje = new Date();
 
       for (let i = 0; i < parcelas; i++) {
-        // Sempre empurra para o mês que vem
         let dataGasto = new Date(
           hoje.getFullYear(),
           hoje.getMonth() + i + 1,
@@ -155,7 +152,6 @@ bot.on("text", async (ctx) => {
         requestBody: { values: linhasParaInserir },
       });
 
-      // Recalcula o status real
       const respostaPlanilha = await sheets.spreadsheets.values.get({
         spreadsheetId: process.env.SPREADSHEET_ID,
         range: "Página1!A:E",
@@ -254,15 +250,20 @@ bot.on("text", async (ctx) => {
       );
     }
   } catch (error) {
-    console.error("Erro interno:", error);
-    ctx.reply(
-      "Tive um problema ao processar. Verifique se a frase está clara e tente novamente.",
+    console.error("Erro detalhado:", error);
+    // Agora o bot mostra exatamente qual foi o erro no Telegram
+    ctx.telegram.editMessageText(
+      ctx.chat.id,
+      loadingMsg.message_id,
+      undefined,
+      `🚨 Tive um problema técnico. O sistema relatou o seguinte erro: \n\n_${error.message}_\n\nVerifique e tente novamente.`,
+      { parse_mode: "Markdown" },
     );
   }
 });
 
 bot.launch();
-console.log("Bot blindado, online e rodando!");
+console.log("Bot blindado e rodando!");
 
 const app = express();
 app.get("/", (req, res) => res.send("Bot Financeiro está online! 🚀"));
