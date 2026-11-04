@@ -251,7 +251,7 @@ bot.on("text", async (ctx) => {
     }
   } catch (error) {
     console.error("Erro detalhado:", error);
-    // Agora o bot mostra exatamente qual foi o erro no Telegram
+    // Agora o bot mostra exatamente qual foi o erro no Tele
     ctx.telegram.editMessageText(
       ctx.chat.id,
       loadingMsg.message_id,
