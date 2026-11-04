@@ -95,8 +95,8 @@ bot.on("text", async (ctx) => {
   try {
     loadingMsg = await ctx.reply("Calculando... 🤔");
 
-    // ATUALIZADO: Usando o modelo Gemini 2.0 Flash
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+    // ATUALIZADO: Usando o modelo Gemini 3.8 Flash exigido pelo Google
+    const model = genAI.getGenerativeModel({ model: "gemini-3.8-flash" });
     const result = await model.generateContent(
       `${systemPrompt}\n\nUsuário: "${userMessage}"`,
     );
@@ -269,7 +269,7 @@ bot.on("text", async (ctx) => {
 });
 
 bot.launch();
-console.log("Bot atualizado para a versão 2.0 e rodando!");
+console.log("Bot atualizado para a versão 3.8 e rodando!");
 
 const app = express();
 app.get("/", (req, res) => res.send("Bot Financeiro está online! 🚀"));
