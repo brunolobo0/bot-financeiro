@@ -26,16 +26,17 @@ Analise a mensagem do usuário e identifique se a intenção é REGISTRAR um gas
 Devolva ESTRITAMENTE um objeto JSON.
 
 Se REGISTRAR, devolva neste formato:
-{"intencao": "registrar", "categoria": "Eletrônicos", "valor_total": 300.00, "descricao": "Microondas", "parcelado": true, "qtd_parcelas": 3}
+{"intencao": "registrar", "categoria": "Outros", "valor_total": 637.00, "descricao": "Compra", "parcelado": true, "qtd_parcelas": 7}
 (Categorias válidas: Luz, Água, Combustível, Alimentação, Internet, Outros)
 
-⚠️ REGRAS:
-- Se dividiu a conta, o "valor_total" é SÓ a parte do usuário.
-- Se for parcelado, "parcelado": true, extraia "qtd_parcelas", e "valor_total" é o valor INTEGRAL.
+⚠️ REGRAS MATEMÁTICAS (MUITO IMPORTANTE):
+1. O "valor_total" DEVE ser o preço FINAL. Use apenas números e ponto (ex: 637.00). NUNCA inclua "R$".
+2. SE O USUÁRIO INFORMAR O VALOR DA PARCELA (ex: "7 parcelas de 91"), VOCÊ DEVE MULTIPLICAR quantidade x parcela (7 * 91 = 637) e enviar o TOTAL no "valor_total".
+3. Se houver divisão de conta, calcule SÓ a parte do usuário.
 
-Se CONSULTAR:
-{"intencao": "consultar", "categoria": "Alimentação", "ciclo": "atual"}
-(Se o usuário perguntar da "próxima fatura" ou "mês que vem", use "ciclo": "proximo")`;
+Se CONSULTAR, devolva:
+{"intencao": "consultar", "categoria": "Alimentação"}
+(Use categoria "Todas" se for uma pergunta geral)`;
 
 function obterInicioDoCiclo(dataAtual) {
   let ano = dataAtual.getFullYear();
@@ -45,6 +46,7 @@ function obterInicioDoCiclo(dataAtual) {
   let primeiroDiaUtil = new Date(primeiroDiaMes);
   if (diaSemana === 0) primeiroDiaUtil.setDate(2);
   if (diaSemana === 6) primeiroDiaUtil.setDate(3);
+
   if (dataAtual < primeiroDiaUtil) {
     primeiroDiaMes = new Date(ano, mes - 1, 1);
     diaSemana = primeiroDiaMes.getDay();
@@ -66,13 +68,15 @@ function obterFimDoCiclo(inicioDoCiclo) {
   return primeiroDiaUtil;
 }
 
+// 🛡️ Função Blindada: Garante que nada que a IA inventar vai quebrar a planilha
 function converterValorSeguro(texto) {
   if (!texto) return 0;
   let stringVal = texto.toString().trim();
+  stringVal = stringVal.replace(/[^\d,\.-]/g, "");
   if (stringVal.includes(",")) {
     return parseFloat(stringVal.replace(/\./g, "").replace(",", ".")) || 0;
   } else {
-    return parseFloat(stringVal.replace(/[^\d.-]/g, "")) || 0;
+    return parseFloat(stringVal) || 0;
   }
 }
 
@@ -91,14 +95,16 @@ bot.on("text", async (ctx) => {
   try {
     const loadingMsg = await ctx.reply("Calculando... 🤔");
 
-    const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash",
-      generationConfig: { responseMimeType: "application/json" },
-    });
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
     const result = await model.generateContent(
       `${systemPrompt}\n\nUsuário: "${userMessage}"`,
     );
-    const iaResponse = JSON.parse(result.response.text());
+    const responseText = result.response
+      .text()
+      .replace(/```json/g, "")
+      .replace(/```/g, "")
+      .trim();
+    const iaResponse = JSON.parse(responseText);
 
     const inicioAtual = obterInicioDoCiclo(new Date());
     const fimAtual = obterFimDoCiclo(inicioAtual);
@@ -108,13 +114,20 @@ bot.on("text", async (ctx) => {
     if (iaResponse.intencao === "registrar") {
       const isParcelado = iaResponse.parcelado;
       const parcelas = parseInt(iaResponse.qtd_parcelas) || 1;
-      const valorTotal = parseFloat(iaResponse.valor_total) || 0;
-      const valorParcela = valorTotal / parcelas;
 
+      // Passa pelo filtro de blindagem
+      const valorTotal = converterValorSeguro(iaResponse.valor_total);
+
+      if (valorTotal === 0 || isNaN(valorTotal)) {
+        throw new Error("Valor extraído é nulo ou inválido.");
+      }
+
+      const valorParcela = valorTotal / parcelas;
       const linhasParaInserir = [];
       const hoje = new Date();
 
       for (let i = 0; i < parcelas; i++) {
+        // Sempre empurra para o mês que vem
         let dataGasto = new Date(
           hoje.getFullYear(),
           hoje.getMonth() + i + 1,
@@ -142,6 +155,7 @@ bot.on("text", async (ctx) => {
         requestBody: { values: linhasParaInserir },
       });
 
+      // Recalcula o status real
       const respostaPlanilha = await sheets.spreadsheets.values.get({
         spreadsheetId: process.env.SPREADSHEET_ID,
         range: "Página1!A:E",
@@ -174,6 +188,7 @@ bot.on("text", async (ctx) => {
         `✅ **Gasto anotado para a próxima fatura!**\n\n` +
         `🏷 Categoria: ${iaResponse.categoria}\n` +
         `💸 Valor: R$ ${valorTotal.toFixed(2).replace(".", ",")}${detalheParcelaMsg}\n\n` +
+        `📊 **Resumo Atualizado:**\n` +
         `🗓 **Fatura Atual (Vence este mês):** R$ ${faturaAtual.toFixed(2).replace(".", ",")}\n` +
         `📅 **Próxima Fatura (Mês que vem):** R$ ${faturaProxima.toFixed(2).replace(".", ",")}`;
 
@@ -191,11 +206,9 @@ bot.on("text", async (ctx) => {
       });
       const linhas = respostaPlanilha.data.values || [];
 
-      let total = 0;
+      let totalAtual = 0;
+      let totalProximo = 0;
       const categoriaBuscada = iaResponse.categoria;
-      const isProximo = iaResponse.ciclo === "proximo";
-      const alvoInicio = isProximo ? inicioProximo : inicioAtual;
-      const alvoFim = isProximo ? fimProximo : fimAtual;
 
       for (let i = 1; i < linhas.length; i++) {
         if (!linhas[i][0] || !linhas[i][3]) continue;
@@ -207,21 +220,30 @@ bot.on("text", async (ctx) => {
         );
         const categoriaPlanilha = (linhas[i][1] || "").toLowerCase();
 
-        if (dataGasto >= alvoInicio && dataGasto < alvoFim) {
-          if (
-            categoriaBuscada === "Todas" ||
-            categoriaPlanilha === categoriaBuscada.toLowerCase()
-          ) {
-            total += converterValorSeguro(linhas[i][3]);
-          }
+        if (
+          categoriaBuscada === "Todas" ||
+          categoriaPlanilha === categoriaBuscada.toLowerCase()
+        ) {
+          const val = converterValorSeguro(linhas[i][3]);
+          if (dataGasto >= inicioAtual && dataGasto < fimAtual)
+            totalAtual += val;
+          else if (dataGasto >= inicioProximo && dataGasto < fimProximo)
+            totalProximo += val;
         }
       }
 
-      const rotuloCiclo = isProximo ? "Próxima fatura" : "Fatura atual";
-      let msg =
-        categoriaBuscada === "Todas"
-          ? `📊 **${rotuloCiclo}:** R$ ${total.toFixed(2).replace(".", ",")}`
-          : `🔎 Você tem **R$ ${total.toFixed(2).replace(".", ",")}** com *${categoriaBuscada}* na ${rotuloCiclo.toLowerCase()}.`;
+      let msg = "";
+      if (categoriaBuscada === "Todas") {
+        msg =
+          `📊 **Resumo das suas Faturas:**\n\n` +
+          `🗓 **Fatura Atual (Neste mês):** R$ ${totalAtual.toFixed(2).replace(".", ",")}\n` +
+          `📅 **Próxima Fatura (Mês que vem):** R$ ${totalProximo.toFixed(2).replace(".", ",")}`;
+      } else {
+        msg =
+          `🔎 Com *${categoriaBuscada}* você tem:\n\n` +
+          `🗓 **Neste mês:** R$ ${totalAtual.toFixed(2).replace(".", ",")}\n` +
+          `📅 **Mês que vem:** R$ ${totalProximo.toFixed(2).replace(".", ",")}`;
+      }
 
       await ctx.telegram.editMessageText(
         ctx.chat.id,
@@ -234,13 +256,13 @@ bot.on("text", async (ctx) => {
   } catch (error) {
     console.error("Erro interno:", error);
     ctx.reply(
-      "Tive um problema ao conectar com a planilha. Verifique se o formato do número está correto e tente novamente.",
+      "Tive um problema ao processar. Verifique se a frase está clara e tente novamente.",
     );
   }
 });
 
 bot.launch();
-console.log("Bot conectado à Planilha e rodando!");
+console.log("Bot blindado, online e rodando!");
 
 const app = express();
 app.get("/", (req, res) => res.send("Bot Financeiro está online! 🚀"));
